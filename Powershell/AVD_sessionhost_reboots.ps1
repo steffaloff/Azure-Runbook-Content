@@ -1,4 +1,28 @@
-# Automate Reboots of Azure VMs
+<#
+.SYNOPSIS
+    Reboots of Azure VMs
+.DESCRIPTION
+    Set context and use managed identity to present scope.
+    Try resource group name
+    Get VMs in resource group and split by index - reboot first section, then other.
+.EXAMPLE
+    powershell avd_sessionhost_reboots.ps1 -rescouregroup example-rg-name
+.EXAMPLE
+    Another example of how to use this cmdlet
+.INPUTS
+    Parameter ResourceGroupName
+.OUTPUTS
+    Output from this cmdlet (if any)
+.NOTES
+    Currently configured to run in Azure Automation Account with managed identity (System)
+    Write-host does not work with runner, use Write-Output instead
+.COMPONENT
+    The component this cmdlet belongs to
+.ROLE
+    The role this cmdlet belongs to
+.FUNCTIONALITY
+    Restart of Azure VM
+#>
 
 [CmdletBinding()]
 param (
@@ -7,9 +31,9 @@ param (
 )
 
 # Variables
-#[System.Collections.ArrayList]$VMs = @()
-[System.Collections.ArrayList]$batch1 = @()
-[System.Collections.ArrayList]$batch2 = @()
+# [System.Collections.ArrayList]$VMList = @()
+# [System.Collections.ArrayList]$batch1 = @()
+# [System.Collections.ArrayList]$batch2 = @()
 
 
 # Ensure not to inherit an AzContext in runbook
@@ -26,7 +50,7 @@ catch{
 # Set and store context
 $AzureContext = Set-AzContext -SubscriptionName $AzureContext.Subscription -DefaultProfile $AzureContext
 # Show Context Subscription
-Write-Host "Subscription ID: "$AzureContext.Subscription
+Write-Output "Subscription ID: "$AzureContext.Subscription
 
 # Check RG name
 try{
@@ -39,89 +63,102 @@ catch{
     Write-Output $err;
     exit
 }
-
-# Get current state of VMs
-$VMs = Get-AzVM -ResourceGroupName $ResourceGroup -Status
-Write-Host "VMs Total:"$VMs.Count
-#Write-Host $VMs
-
-# Split VMs
-for ($i=0; $i -le $VMs.Count-1; $i++){
-    #Write-Host "VM Name: "$VMs[$i].Name
-    if(($i+1) % 2 -ne 0){
-        $batch1.Add($VMs[$i]) | Out-Null
-        Write-Host "Add"$VMs[$i].Name"to Batchlist 1"
-    }    
-    else{
-        $batch2.Add($VMs[$i]) | Out-Null
-        Write-Host "Add"$VMs[$i].Name"to Batchlist 2"
-    }
-}"`n"
-
-# Check each VM in batchlist1 and reboot if running
-if ($batch1.Count -gt 0){
-    Write-Host "Reboot check for Batchlist 1"
-    foreach ($vm in $batch1){
-        Write-Host "State: "$vm.Name"-"$vm.PowerState
-        if ($vm.PowerState -eq 'VM running'){
-            Write-Host "Restart VM"$vm.Name"in RG"$vm.ResourceGroupName
-            Restart-AzVM `
-		    -Name $vm.Name `
-		    -ResourceGroupName $vm.ResourceGroupName
-        }
-    }
-}"`n"
-
-# Pause
-Write-Host "Pause for 10 seconds"
-Start-Sleep -Seconds 10
 "`n"
 
-# Check if all VMs in batchlist1 is running before processing batchlist2
-Write-Host "Run VM check on batchlist 1"
-$timeOut = New-TimeSpan -Seconds 5
-$endTime = (Get-Date).Add($timeOut)
-Do {Write-Host "checking list"} until (($batchcheck = $batch1 | ? {$_.PowerState -eq 'VM running' -and $_.StatusCode -eq 'OK'}) -or ((Get-Date) -gt $endTime))
-"`n"
+###############
+## Functions ##
+###############
 
-if (-Not $batchcheck){
-    Write-Host "BatchCheck failed"
-    exit
-}
-else{
-    # Check each VM in batchlist2 and reboot if running
-    if ($batch2.Count -gt 0){
-        Write-Host "Reboot check for Batchlist 2"
-        foreach ($vm in $batch2){
-            Write-Host "State: "$vm.Name"-"$vm.PowerState
-            if ($vm.PowerState -eq 'VM running'){
-                Write-Host "Restart VM"$vm.Name"in RG"$vm.ResourceGroupName
-                Restart-AzVM `
-                -Name $vm.Name `
-                -ResourceGroupName $vm.ResourceGroupName
+# Prepare VMs for Reboot
+function Set-Reboot {
+    param (
+        [int]$batchValue,
+        [System.Object]$VMs
+    )
+    # Create index list
+    $vmIndex = Get-VMList -VMs $VMs
+    foreach ($vm in $VMs){
+        # Get Details of VM
+        $vmDetails = Get-AzVM -ResourceGroupName $ResourceGroup -Name $vm.Name -Status
+        # Check index
+        if (($vmIndex.IndexOf($vm.Name)+$batchValue) % 2 -eq 0){
+            # Check State and Status
+            if ($vmDetails.Statuses[1].DisplayStatus -eq 'VM Running'){
+                Restart-AzVM -ResourceGroupName $ResourceGroup -Name $vm.Name | Out-Null
+                $output = "Rebooting: "+$vm.Name
+                Write-Output $output
+            }
+            else {
+                $output = $vm.Name+" did not reboot due to: "+$vmDetails.Statuses[1].DisplayStatus
+                Write-Output $output
             }
         }
+        else {
+            Write-Output "VM belongs to other batch"
+        }
+            
+    }
+        
+}
+
+# Get VM Status
+function Get-VMStatus {
+    param (
+        [System.Object]$VMs
+    )
+    Write-Output "State of VMs:"
+    foreach ($vm in $VMs){
+        # Get Details of VM
+        $vmDetails = Get-AzVM -ResourceGroupName $ResourceGroup -Name $vm.Name -Status
+        # Show current State
+        $vmStatus = "Name: "+$vm.Name+", PowerState: "+$vmDetails.Statuses[1].DisplayStatus
+        Write-Output $vmStatus
+    }
+    
+}
+
+# Add VM info to array
+function Get-VMList {
+    param (
+        [System.Object]$VMs
+    )
+    [System.Collections.ArrayList]$VMList = @()
+    foreach ($vm in $VMs) {
+        $VMList.Add($vm.Name) | Out-Null
+    }
+    return $VMList
+}
+
+# Main 
+function Main {
+    # Get all VMs in RG
+    $VMs = Get-AzVM -ResourceGroupName $ResourceGroup
+    $totalvms = "VMs Total: "+$VMs.Count
+    Write-Output $totalvms
+
+    # Show Status
+    Get-VMStatus -VMs $VMs
+    "`n"
+
+    # Start reboot cycle
+    if ($VMs.Count -eq 0){
+        Write-Output "No VMs to reboot!"
+    }
+    elseif ($VMs.Count -eq 1) {
+        Set-Reboot -batchValue 2 -VMs $VMs
+        "`n"
+    }
+    else {
+        Set-Reboot -batchValue 1 -VMs $VMs
+        "`n"
+        # Pause
+        Write-Output "Pause for 5 seconds"
+        Start-Sleep -Seconds 5
+        "`n"
+        Set-Reboot -batchValue 2 -VMs $VMs
     }
 }
 
-#Write-Host "Batch1: "$batch1
-#Write-Host "Batch2: "$batch2
-
-# foreach ($vm in $VMs) {
-#     Write-Host "Name: "$vm" - Index:"($VMs.IndexOf($vm))
-#     if($VMs.IndexOf($vm) % 2 -ne 0){
-#         $batch1.Add($vm) | Out-Null
-#     }    
-#     else{
-#         $batch2.Add($vm) | Out-Null
-#     }
-# }
-# Write-Host "Batch1: "$batch1
-# Write-Host "Batch2: "$batch2
-
-# # For each VM in Batch1
-# if($batch1.Count -gt 0){
-#     foreach ($VM in $batch1) {
-#         Write-Host "VM Name:"$VM.Name"- PowerState:"$VM.PowerState
-#     }
-# }
+# Run Main function
+Write-Output "Run Main"
+Main
